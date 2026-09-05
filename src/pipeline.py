@@ -32,7 +32,13 @@ from src.config import get_ledger_adapter
 from src.consent import ConsentRefused, check_consent_or_refuse
 from src.evidence import build_evidence_record, write_evidence_bundle
 from src.face import FaceError, encode_face
-from src.search import SearchError, SerpApiLensClient, search_and_verify
+from src.search import (
+    SearchError,
+    SerpApiLensClient,
+    YandexClient,
+    search_and_verify,
+    yandex_search_and_verify,
+)
 
 try:
     from rich.console import Console
@@ -76,6 +82,8 @@ def run_pipeline(
     operator: Optional[str] = None,
     auto_consent: bool = False,
     do_verify: bool = False,
+    engine: str = "lens",
+    image_url: Optional[str] = None,
 ) -> int:
     """Execute the full pipeline. Returns a process exit code.
 
@@ -117,13 +125,28 @@ def run_pipeline(
     _say("consent registered -> search ALLOWED", style="green")
 
     # ----- [2/3] SEARCH --------------------------------------------------- #
-    _rule("[2/3] SEARCH  -  reverse image search + face re-verify")
+    _rule(f"[2/3] SEARCH  -  {engine} reverse image search + face re-verify")
     try:
-        client = SerpApiLensClient(api_key)
-        outcome = search_and_verify(
-            image_path, face.embedding, client=client,
-            threshold=threshold, max_candidates=max_candidates, refresh=refresh, salt=salt,
-        )
+        if engine == "yandex":
+            from src.hosting import HostingError, imgbb_upload
+
+            try:
+                public_url = image_url or imgbb_upload(
+                    image_path, os.environ.get("IMGBB_API_KEY", ""), refresh=refresh
+                )
+            except HostingError as exc:
+                _panel(str(exc), "HOSTING FAILED", "red")
+                return 6
+            _say(f"hosted for Yandex: {public_url}")
+            outcome = yandex_search_and_verify(
+                public_url, face.embedding, client=YandexClient(api_key),
+                threshold=threshold, max_candidates=max_candidates, refresh=refresh, salt=salt,
+            )
+        else:
+            outcome = search_and_verify(
+                image_path, face.embedding, client=SerpApiLensClient(api_key),
+                threshold=threshold, max_candidates=max_candidates, refresh=refresh, salt=salt,
+            )
     except SearchError as exc:
         _panel(str(exc), "SEARCH FAILED", "red")
         return 6
@@ -215,6 +238,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="self-consent: register consent for this face first, then run (one-shot)")
     p.add_argument("--verify", action="store_true",
                    help="after anchoring, immediately re-verify the evidence bundle")
+    p.add_argument("--engine", choices=["lens", "yandex"], default="lens",
+                   help="search engine: lens (Google Lens, default) or yandex (needs IMGBB_API_KEY)")
+    p.add_argument("--image-url", default=None,
+                   help="public image URL for yandex (skip imgbb upload; e.g. a GitHub raw URL)")
     return p
 
 
@@ -224,6 +251,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         args.image, threshold=args.threshold, max_candidates=args.max,
         refresh=args.refresh, salt=args.salt, out_dir=args.out, operator=args.operator,
         auto_consent=args.consent, do_verify=args.verify,
+        engine=args.engine, image_url=args.image_url,
     )
 
 

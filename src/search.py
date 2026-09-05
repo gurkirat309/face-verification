@@ -331,26 +331,38 @@ def search_and_verify(
         max_candidates: cap on how many candidates we download+check (pass 2).
         refresh: force a live SerpApi call even if cached.
     """
-    from src.face import cosine_similarity, encode_face, NoFaceError, FaceError
-
     image_id = client.upload_image(query_image_path, refresh=refresh)
     response, was_cached = client.reverse_image_search(image_id=image_id, refresh=refresh)
     candidates = parse_candidates(response)
-
-    outcome = SearchOutcome(
-        query_image_url=f"image_id:{image_id}",
-        was_cached=was_cached,
-        total_candidates=len(candidates),
-        checked=0,
-        threshold=threshold,
+    return _verify_candidates(
+        candidates, reference_embedding, query_label=f"image_id:{image_id}",
+        was_cached=was_cached, threshold=threshold, max_candidates=max_candidates,
+        salt=salt, verbose=verbose,
     )
 
-    from src._util import suppress_native_stderr
 
+def _verify_candidates(
+    candidates: list[Candidate],
+    reference_embedding: np.ndarray,
+    *,
+    query_label: str,
+    was_cached: bool,
+    threshold: float,
+    max_candidates: int,
+    salt: Optional[str],
+    verbose: bool,
+) -> SearchOutcome:
+    """Pass 2 (engine-agnostic): download each candidate image and re-run the
+    face matcher, keeping matches above the threshold. Falls back to the
+    engine-hosted thumbnail when the full image URL won't download as a face."""
+    from src._util import suppress_native_stderr
+    from src.face import FaceError, NoFaceError, cosine_similarity, encode_face
+
+    outcome = SearchOutcome(
+        query_image_url=query_label, was_cached=was_cached,
+        total_candidates=len(candidates), checked=0, threshold=threshold,
+    )
     for cand in candidates[:max_candidates]:
-        # Try the full image first, then fall back to the Google-hosted thumbnail
-        # (the full URL for LinkedIn/Instagram hits is often a crawler/SEO link
-        # that doesn't download as a real face image).
         res = None
         used_path = None
         for url in (cand.image_url, cand.thumbnail_url):
@@ -360,26 +372,127 @@ def search_and_verify(
             if not path:
                 continue
             try:
-                with suppress_native_stderr():  # hush libpng noise from odd thumbnails
-                    # recover=False: candidates are many and "no face" is expected;
-                    # skip the slow rotation/hi-res retries used for the input image.
+                with suppress_native_stderr():
                     res = encode_face(path, salt=salt or "search-temp-salt", recover=False)
                 used_path = path
                 break
             except (NoFaceError, FaceError, FileNotFoundError):
-                continue  # try the next URL for this candidate
+                continue
         if res is None:
-            continue  # no downloadable face from any URL -> skip candidate
+            continue
         outcome.checked += 1
         sim = cosine_similarity(reference_embedding, res.embedding)
         if verbose:
-            print(f"    checked {cand.source[:28]:28} [{cand.section[:6]:6}] sim={sim:+.3f} {'MATCH' if sim>=threshold else ''}")
+            print(f"    checked {cand.source[:28]:28} [{cand.section[:8]:8}] sim={sim:+.3f} {'MATCH' if sim>=threshold else ''}")
         outcome.best_similarity = max(outcome.best_similarity, sim)
         if sim >= threshold:
             outcome.matches.append(VerifiedMatch(candidate=cand, similarity=sim, image_local_path=used_path))
 
     outcome.matches.sort(key=lambda m: m.similarity, reverse=True)
     return outcome
+
+
+# --------------------------------------------------------------------------- #
+# Yandex engine (reverse image search; better face coverage than Google Lens)  #
+# --------------------------------------------------------------------------- #
+class YandexClient:
+    """Cache-first client for SerpApi's Yandex reverse-image engine.
+
+    Yandex needs a PUBLIC image URL (no upload path) AND rejects many file hosts
+    (catbox/tmpfiles). Use a mainstream CDN URL (imgbb/i.ibb.co, GitHub raw). See
+    src/hosting.py for turning a local image into an imgbb URL.
+    """
+
+    def __init__(self, api_key: str, cache_dir: str = DEFAULT_CACHE_DIR) -> None:
+        if not api_key:
+            raise SearchError("No SerpApi key. Set RIS_API_KEY in .env.")
+        self.api_key = api_key
+        self.cache_dir = os.path.join(cache_dir, "serpapi")
+
+    def reverse_image_search(self, image_url: str, *, refresh: bool = False, timeout: int = 90) -> tuple[dict, bool]:
+        key = hashlib.sha256(json.dumps({"engine": "yandex_images", "url": image_url}, sort_keys=True).encode()).hexdigest()[:32]
+        cache_path = os.path.join(self.cache_dir, key + ".json")
+        if not refresh and os.path.exists(cache_path):
+            with open(cache_path, "r", encoding="utf-8") as fh:
+                return json.load(fh), True
+        params = {"engine": "yandex_images", "url": image_url, "api_key": self.api_key}
+        req_url = SERPAPI_ENDPOINT + "?" + urllib.parse.urlencode(params)
+        try:
+            req = urllib.request.Request(req_url, headers={"User-Agent": _UA})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            if os.path.exists(cache_path):
+                with open(cache_path, "r", encoding="utf-8") as fh:
+                    return json.load(fh), True
+            raise SearchError(f"Yandex request failed and no cache available: {exc}") from exc
+        if data.get("error"):
+            raise SearchError(f"Yandex returned an error: {data['error']}")
+        os.makedirs(self.cache_dir, exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2, ensure_ascii=False)
+        return data, False
+
+
+def parse_yandex_candidates(response: dict) -> list[Candidate]:
+    """Parse a Yandex reverse-image response into Candidates.
+
+    Uses image_results (full original_image + Yandex-hosted thumbnail fallback)
+    and similar_images. De-duplicates by page link.
+    """
+    out: list[Candidate] = []
+    seen: set[str] = set()
+    for m in response.get("image_results", []):
+        link = m.get("link") or ""
+        if link and link in seen:
+            continue
+        image = _as_url(m.get("original_image"))
+        thumb = _as_url(m.get("thumbnail"))
+        if not (image or thumb):
+            continue
+        if link:
+            seen.add(link)
+        out.append(Candidate(
+            position=len(out) + 1, title=(m.get("title") or "").strip(), page_link=link,
+            source=m.get("source") or urllib.parse.urlparse(link).netloc,
+            image_url=image or thumb, thumbnail_url=thumb, section="yandex_img",
+        ))
+    for m in response.get("similar_images", []):
+        link = m.get("link") or ""
+        image = _as_url(m.get("image"))
+        if not image or (link and link in seen):
+            continue
+        if link:
+            seen.add(link)
+        out.append(Candidate(
+            position=len(out) + 1, title=(m.get("title") or "").strip(), page_link=link,
+            source=urllib.parse.urlparse(link).netloc, image_url=image,
+            thumbnail_url="", section="yandex_sim",
+        ))
+    return out
+
+
+def yandex_search_and_verify(
+    image_url: str,
+    reference_embedding: np.ndarray,
+    *,
+    client: YandexClient,
+    threshold: float = 0.5,
+    max_candidates: int = 100,
+    refresh: bool = False,
+    salt: Optional[str] = None,
+    verbose: bool = False,
+) -> SearchOutcome:
+    """Yandex reverse image search (pass 1) + face re-verification (pass 2).
+
+    image_url must be a PUBLIC url on a CDN Yandex accepts (imgbb/GitHub raw)."""
+    response, was_cached = client.reverse_image_search(image_url, refresh=refresh)
+    candidates = parse_yandex_candidates(response)
+    return _verify_candidates(
+        candidates, reference_embedding, query_label=f"yandex:{image_url}",
+        was_cached=was_cached, threshold=threshold, max_candidates=max_candidates,
+        salt=salt, verbose=verbose,
+    )
 
 
 # --------------------------------------------------------------------------- #
