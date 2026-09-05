@@ -123,6 +123,7 @@ def _get_app():
         import warnings
 
         warnings.filterwarnings("ignore")
+        os.environ.setdefault("OPENCV_LOG_LEVEL", "SILENT")
         os.environ.setdefault("INSIGHTFACE_HOME", os.path.expanduser("~/.insightface"))
         # Silence the noisy per-model prints from insightface.
         import contextlib

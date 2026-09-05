@@ -330,12 +330,15 @@ def search_and_verify(
         threshold=threshold,
     )
 
+    from src._util import suppress_native_stderr
+
     for cand in candidates[:max_candidates]:
         path = download_image(cand.image_url)
         if not path:
             continue
         try:
-            res = encode_face(path, salt=salt or "search-temp-salt")
+            with suppress_native_stderr():  # hush libpng noise from odd thumbnails
+                res = encode_face(path, salt=salt or "search-temp-salt")
         except (NoFaceError, FaceError, FileNotFoundError):
             continue  # no face / unreadable -> not a match, keep going
         outcome.checked += 1

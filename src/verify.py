@@ -78,7 +78,7 @@ def verify_bundle(record_json_path: str, *, os_module=None) -> tuple[bool, list[
             dist = phash_distance(record.image_phash, actual_ph)
             rows.append(_row(f"image_phash (dist={dist})", dist <= 8, record.image_phash, actual_ph))
         except Exception:
-            pass
+            rows.append(_row("image_phash", False, record.image_phash, "(image no longer decodes)"))
     else:
         rows.append(_row("image_sha256", False, record.image_sha256, "(image sidecar missing)"))
 
