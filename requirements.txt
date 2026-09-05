@@ -14,14 +14,12 @@ python-dotenv>=1.0        # optional; config.py has a fallback parser if absent
 imagehash>=4.3            # perceptual hash (pHash) that survives crop/recompress
 Pillow>=10.0             # image IO for hashing
 
-# --- Face stage (Phase 1): choose ONE stack at Phase 1 (see decisions list).
-# Left commented until we pick, to keep the Phase-0 install clean & fast.
-#   Option A (recommended, accurate):
-# insightface>=0.7
-# onnxruntime>=1.17
-#   Option B (simpler API, painful build on Windows/new Python):
-# face_recognition>=1.3
-# dlib>=19.24
+# --- Face stage (Phase 1): CHOSEN stack = insightface (buffalo_l / ArcFace).
+# Downloads a ~280 MB model on first use into ~/.insightface (one-time).
+insightface>=1.0
+onnxruntime>=1.17
+opencv-python-headless>=4.9
+numpy>=1.24
 
 # --- Search stage (Phase 3): reverse image search client. TBD in Phase 3.
 # requests>=2.31          # if we script HTTP against a RIS provider
