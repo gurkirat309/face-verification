@@ -1,0 +1,37 @@
+# --- Biometric / sensitive local data (NEVER commit) ---
+# Raw input images, face embeddings, cached matched images, the generated ledger.
+data/
+out/
+!data/.gitkeep
+!out/.gitkeep
+
+# Secrets / local config
+.env
+
+# API response cache (Phase 3)
+cache/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.python-version
+
+# --- Tooling ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
