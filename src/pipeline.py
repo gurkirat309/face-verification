@@ -69,7 +69,7 @@ def run_pipeline(
     image_path: str,
     *,
     threshold: Optional[float] = None,
-    max_candidates: int = 25,
+    max_candidates: int = 100,
     refresh: bool = False,
     salt: Optional[str] = None,
     out_dir: str = "out",
@@ -141,10 +141,18 @@ def run_pipeline(
         return 0
 
     best = outcome.matches[0]
-    _say(f"VERIFIED MATCH  similarity={best.similarity:.3f}  source={best.candidate.source}", style="green")
-    _say(f"{best.candidate.page_link}")
+    _say(f"VERIFIED MATCHES: {len(outcome.matches)}  (best {best.similarity:.3f})", style="green")
+    _SOCIAL = ("linkedin.", "instagram.", "twitter.", "x.com", "facebook.", "tiktok.", "youtube.")
+    social = [m for m in outcome.matches if any(s in (m.candidate.page_link + m.candidate.source).lower() for s in _SOCIAL)]
+    if social:
+        _say(f"social/profile hits: {len(social)}", style="bold yellow")
+        for m in social[:6]:
+            _say(f"  [{m.similarity:.3f}] {m.candidate.source}: {m.candidate.page_link}", style="yellow")
+    _say("top matches:")
+    for m in outcome.matches[:8]:
+        _say(f"  [{m.similarity:.3f}] {m.candidate.source}: {m.candidate.page_link}")
     audit.log(face.subject_hash, "match_found",
-              f"sim={best.similarity:.3f} src={best.candidate.source}", operator=operator)
+              f"sim={best.similarity:.3f} matches={len(outcome.matches)} src={best.candidate.source}", operator=operator)
 
     # ----- [3/3] CHAIN ---------------------------------------------------- #
     _rule("[3/3] CHAIN  -  build evidence + anchor")
@@ -198,7 +206,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m src.pipeline", description="Face -> search -> blockchain evidence pipeline.")
     p.add_argument("--image", required=True, help="local image of the (consented) subject")
     p.add_argument("--threshold", type=float, default=None, help="match threshold [0..1] (default FACE_MATCH_THRESHOLD)")
-    p.add_argument("--max", type=int, default=25, help="max candidates to face-check")
+    p.add_argument("--max", type=int, default=100, help="max candidates to face-check")
     p.add_argument("--refresh", action="store_true", help="force a LIVE SerpApi search (spends 1)")
     p.add_argument("--salt", default=None, help="hashing salt (default from .env)")
     p.add_argument("--out", default="out", help="output directory for evidence bundles")

@@ -53,7 +53,9 @@ class Candidate:
     title: str
     page_link: str          # the web/social page where the image appears
     source: str             # e.g. "twitter.com", "wikipedia.org"
-    image_url: str          # best available image URL (full image or thumbnail)
+    image_url: str          # full-size image URL (may be a crawler/SEO URL)
+    thumbnail_url: str = ""  # Google-hosted thumbnail; reliable fallback for face check
+    section: str = ""       # which response section it came from
 
 
 @dataclass
@@ -232,31 +234,44 @@ class SerpApiLensClient:
 # --------------------------------------------------------------------------- #
 # Parsing + image download                                                     #
 # --------------------------------------------------------------------------- #
+def _as_url(v) -> str:
+    if isinstance(v, dict):  # some schemas nest {link/url/width/height}
+        return v.get("link") or v.get("url") or ""
+    return v or ""
+
+
 def parse_candidates(response: dict) -> list[Candidate]:
     """Extract candidates from a Google Lens response.
 
-    Reads both 'visual_matches' (similar images across the web) and
-    'exact_matches' (pages using the exact same image) -- both are genuine
-    reverse-image hits. De-duplicates by page link.
+    Reads every section that can hold a matching page:
+      * visual_matches  -- similar images across the web
+      * exact_matches   -- pages using the exact same image
+      * organic_results -- related web pages (often the person's own pages)
+    Keeps BOTH the full image URL and the Google-hosted thumbnail so pass-2 can
+    fall back to the thumbnail when the full image URL is a crawler/SEO link that
+    doesn't download as a real image (common for LinkedIn/Instagram results).
+    De-duplicates by page link.
     """
     out: list[Candidate] = []
     seen: set[str] = set()
-    for section in ("visual_matches", "exact_matches"):
+    for section in ("visual_matches", "exact_matches", "organic_results"):
         for m in response.get(section, []):
-            img = m.get("image") or m.get("thumbnail") or ""
-            if isinstance(img, dict):  # some schemas nest {link/width/height}
-                img = img.get("link") or img.get("url") or ""
             link = m.get("link") or ""
-            if not img or link in seen:
+            image = _as_url(m.get("image"))
+            thumb = _as_url(m.get("thumbnail"))
+            if not (image or thumb) or (link and link in seen):
                 continue
-            seen.add(link)
+            if link:
+                seen.add(link)
             out.append(
                 Candidate(
                     position=int(m.get("position", len(out) + 1)),
                     title=(m.get("title") or "").strip(),
                     page_link=link,
                     source=m.get("source") or urllib.parse.urlparse(link).netloc,
-                    image_url=img,
+                    image_url=image or thumb,
+                    thumbnail_url=thumb,
+                    section=section,
                 )
             )
     return out
@@ -300,7 +315,7 @@ def search_and_verify(
     *,
     client: SerpApiLensClient,
     threshold: float = 0.5,
-    max_candidates: int = 25,
+    max_candidates: int = 100,
     refresh: bool = False,
     salt: Optional[str] = None,
     verbose: bool = False,
@@ -333,21 +348,33 @@ def search_and_verify(
     from src._util import suppress_native_stderr
 
     for cand in candidates[:max_candidates]:
-        path = download_image(cand.image_url)
-        if not path:
-            continue
-        try:
-            with suppress_native_stderr():  # hush libpng noise from odd thumbnails
-                res = encode_face(path, salt=salt or "search-temp-salt")
-        except (NoFaceError, FaceError, FileNotFoundError):
-            continue  # no face / unreadable -> not a match, keep going
+        # Try the full image first, then fall back to the Google-hosted thumbnail
+        # (the full URL for LinkedIn/Instagram hits is often a crawler/SEO link
+        # that doesn't download as a real face image).
+        res = None
+        used_path = None
+        for url in (cand.image_url, cand.thumbnail_url):
+            if not url:
+                continue
+            path = download_image(url)
+            if not path:
+                continue
+            try:
+                with suppress_native_stderr():  # hush libpng noise from odd thumbnails
+                    res = encode_face(path, salt=salt or "search-temp-salt")
+                used_path = path
+                break
+            except (NoFaceError, FaceError, FileNotFoundError):
+                continue  # try the next URL for this candidate
+        if res is None:
+            continue  # no downloadable face from any URL -> skip candidate
         outcome.checked += 1
         sim = cosine_similarity(reference_embedding, res.embedding)
         if verbose:
-            print(f"    checked {cand.source[:30]:30} sim={sim:+.3f} {'MATCH' if sim>=threshold else ''}")
+            print(f"    checked {cand.source[:28]:28} [{cand.section[:6]:6}] sim={sim:+.3f} {'MATCH' if sim>=threshold else ''}")
         outcome.best_similarity = max(outcome.best_similarity, sim)
         if sim >= threshold:
-            outcome.matches.append(VerifiedMatch(candidate=cand, similarity=sim, image_local_path=path))
+            outcome.matches.append(VerifiedMatch(candidate=cand, similarity=sim, image_local_path=used_path))
 
     outcome.matches.sort(key=lambda m: m.similarity, reverse=True)
     return outcome
@@ -364,7 +391,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--image", required=True, help="local image of the subject (uploaded to SerpApi + used for pass-2 matching)")
     p.add_argument("--reference", default=None, help="local reference image for pass-2 (default: same as --image)")
     p.add_argument("--threshold", type=float, default=None, help="match threshold [0..1] (default: FACE_MATCH_THRESHOLD or 0.5)")
-    p.add_argument("--max", type=int, default=25, help="max candidates to face-check")
+    p.add_argument("--max", type=int, default=100, help="max candidates to face-check")
     p.add_argument("--refresh", action="store_true", help="force a LIVE SerpApi call (spends 1 search)")
     p.add_argument("--salt", default=None, help="hashing salt (default from .env)")
     return p
