@@ -74,8 +74,15 @@ def run_pipeline(
     salt: Optional[str] = None,
     out_dir: str = "out",
     operator: Optional[str] = None,
+    auto_consent: bool = False,
+    do_verify: bool = False,
 ) -> int:
-    """Execute the full pipeline. Returns a process exit code."""
+    """Execute the full pipeline. Returns a process exit code.
+
+    auto_consent: register consent for THIS face before the gate (one-shot
+        self-consent -- use only when the image is the subject's own face).
+    do_verify: after anchoring, immediately re-verify the produced bundle.
+    """
     from src.config import _load_dotenv
 
     _load_dotenv()
@@ -95,6 +102,11 @@ def run_pipeline(
         return 2
     _say(f"subject_hash = {face.subject_hash}")
     _say(f"quality = {face.quality:.3f}   faces detected = {face.num_faces_detected}")
+
+    # ----- CONSENT (self-consent shortcut) -------------------------------- #
+    if auto_consent:
+        rec = ledger.register_consent(face.subject_hash, True)
+        _say(f"self-consent registered ({rec.status.value}) -- uploading own face", style="green")
 
     # ----- GATE (consent) ------------------------------------------------- #
     try:
@@ -166,6 +178,19 @@ def run_pipeline(
         f"Verify it:  python -m src.verify --evidence {paths.record_json}"
     )
     _panel(body, "EVIDENCE ANCHORED", "green")
+
+    # ----- optional immediate verification -------------------------------- #
+    if do_verify:
+        _rule("[verify]  re-checking the anchored evidence", style="magenta")
+        from src.verify import _RICH, _print_plain, _print_rich, verify_bundle
+
+        ok, rows = verify_bundle(paths.record_json)
+        if _RICH:
+            _print_rich(paths.record_json, ok, rows)
+        else:
+            _print_plain(paths.record_json, ok, rows)
+        return 0 if ok else 7
+
     return 0
 
 
@@ -178,6 +203,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--salt", default=None, help="hashing salt (default from .env)")
     p.add_argument("--out", default="out", help="output directory for evidence bundles")
     p.add_argument("--operator", default=None, help="who is running this (audit trail)")
+    p.add_argument("--consent", action="store_true",
+                   help="self-consent: register consent for this face first, then run (one-shot)")
+    p.add_argument("--verify", action="store_true",
+                   help="after anchoring, immediately re-verify the evidence bundle")
     return p
 
 
@@ -186,6 +215,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     return run_pipeline(
         args.image, threshold=args.threshold, max_candidates=args.max,
         refresh=args.refresh, salt=args.salt, out_dir=args.out, operator=args.operator,
+        auto_consent=args.consent, do_verify=args.verify,
     )
 
 
