@@ -361,7 +361,9 @@ def search_and_verify(
                 continue
             try:
                 with suppress_native_stderr():  # hush libpng noise from odd thumbnails
-                    res = encode_face(path, salt=salt or "search-temp-salt")
+                    # recover=False: candidates are many and "no face" is expected;
+                    # skip the slow rotation/hi-res retries used for the input image.
+                    res = encode_face(path, salt=salt or "search-temp-salt", recover=False)
                 used_path = path
                 break
             except (NoFaceError, FaceError, FileNotFoundError):

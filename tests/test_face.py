@@ -111,7 +111,7 @@ def test_no_face_raises(tmp_path):
     p = str(tmp_path / "blank.png")
     cv2.imwrite(p, blank)
     with pytest.raises(NoFaceError):
-        encode_face(p, salt=SALT)
+        encode_face(p, salt=SALT, recover=False)  # fast path; recovery cascade covered elsewhere
 
 
 def test_missing_file_raises():

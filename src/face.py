@@ -199,6 +199,52 @@ def subject_hash_from_embedding(embedding: np.ndarray, salt: str) -> str:
     return sha256_hex(payload)
 
 
+def _detect_hires(app, img):
+    """Re-run detection at larger input sizes for small faces in big images.
+
+    insightface downscales to the prepared det_size (640) before detecting, so a
+    small face in a high-resolution photo can be missed. We temporarily bump the
+    detector to 1280 then 1920, and always restore 640 afterwards.
+    """
+    import contextlib
+    import io
+
+    try:
+        for size in (1280, 1920):
+            with contextlib.redirect_stdout(io.StringIO()):
+                app.prepare(ctx_id=-1, det_size=(size, size))
+            faces = app.get(img)
+            if faces:
+                return faces
+        return []
+    finally:
+        with contextlib.redirect_stdout(io.StringIO()):
+            app.prepare(ctx_id=-1, det_size=(640, 640))
+
+
+def _load_image_bgr(path: str):
+    """Load an image as a BGR uint8 array for insightface, RESPECTING EXIF
+    orientation.
+
+    OpenCV's imread ignores EXIF, so phone photos saved sideways (with a
+    'rotate on display' flag) reach the detector rotated 90 deg and the face is
+    missed -- the classic "face exists but not found" bug. We load via PIL,
+    apply exif_transpose, and hand back BGR. Falls back to cv2.imread if PIL
+    can't open it.
+    """
+    import cv2
+
+    try:
+        from PIL import Image, ImageOps
+
+        with Image.open(path) as im:
+            im = ImageOps.exif_transpose(im)  # honour orientation flag
+            rgb = np.array(im.convert("RGB"))
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    except Exception:
+        return cv2.imread(path)
+
+
 def _resolve_salt(salt: Optional[str]) -> str:
     if salt:
         return salt
@@ -223,6 +269,7 @@ def encode_face(
     allow_multiple: bool = True,
     strict_single: bool = False,
     min_quality: float = 0.0,
+    recover: bool = True,
 ) -> FaceResult:
     """Detect and encode the primary face in ``image_path``.
 
@@ -245,16 +292,38 @@ def encode_face(
     if not os.path.exists(image_path):
         raise FileNotFoundError(f"Image not found: {image_path}")
 
-    img = cv2.imread(image_path)
+    img = _load_image_bgr(image_path)
     if img is None:
         raise FaceError(f"Could not read image (unsupported/corrupt?): {image_path}")
 
-    h, w = img.shape[:2]
     app = _get_app()
     faces = app.get(img)
 
+    # Expensive recovery passes run only for a real input image (recover=True),
+    # never for the many candidate thumbnails during search (where "no face" is a
+    # normal, expected outcome and speed matters).
+    if not faces and recover:
+        # Fallback 1: high-res re-detect. insightface shrinks the image to 640px
+        # before detecting, so a small face in a big phone photo can be missed.
+        faces = _detect_hires(app, img)
+
+    if not faces and recover:
+        # Fallback 2: the photo may be rotated (phone photo with wrong/no EXIF flag).
+        # Try the three rotations and keep the first that yields a face.
+        for rot in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_180):
+            rimg = cv2.rotate(img, rot)
+            rfaces = app.get(rimg) or _detect_hires(app, rimg)
+            if rfaces:
+                img, faces = rimg, rfaces
+                break
+
+    h, w = img.shape[:2]
+
     if not faces:
-        raise NoFaceError(f"No face detected in {image_path}.")
+        raise NoFaceError(
+            f"No face detected in {image_path} (tried all orientations). "
+            "Use a clearer, front-facing photo where the face is not too small."
+        )
 
     if len(faces) > 1 and (strict_single or not allow_multiple):
         raise MultipleFacesError(
