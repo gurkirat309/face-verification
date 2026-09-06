@@ -1,13 +1,12 @@
-"""The end-to-end pipeline: FACE -> CONSENT -> SEARCH -> CHAIN.
+"""The end-to-end pipeline: FACE -> SEARCH -> CHAIN.
 
     python -m src.pipeline --image samples/obama_a.jpg
 
 Steps:
   [1/3] FACE   -- detect + embed + salted subject hash (Stage 1)
-        GATE   -- refuse unless the subject has registered consent (Stage 2)
-  [2/3] SEARCH -- two-pass reverse image search + face re-verification (Stage 3)
+  [2/3] SEARCH -- two-pass reverse image search + face re-verification (Stage 2)
   [3/3] CHAIN  -- build an evidence bundle for the best match and anchor its
-                  hash on the ledger (Stage 4); write the bundle to out/.
+                  hash on the ledger (Stage 3); write the bundle to out/.
 
 On a clean "no match", the pipeline exits without anchoring (that is a valid,
 first-class outcome, logged to the audit trail).
@@ -29,7 +28,6 @@ from typing import Optional
 
 from src.audit import SearchAuditLog, current_operator
 from src.config import get_ledger_adapter
-from src.consent import ConsentRefused, check_consent_or_refuse
 from src.evidence import build_evidence_record, write_evidence_bundle
 from src.face import FaceError, encode_face
 from src.search import (
@@ -80,15 +78,12 @@ def run_pipeline(
     salt: Optional[str] = None,
     out_dir: str = "out",
     operator: Optional[str] = None,
-    auto_consent: bool = False,
     do_verify: bool = False,
     engine: str = "auto",
     image_url: Optional[str] = None,
 ) -> int:
     """Execute the full pipeline. Returns a process exit code.
 
-    auto_consent: register consent for THIS face before the gate (one-shot
-        self-consent -- use only when the image is the subject's own face).
     do_verify: after anchoring, immediately re-verify the produced bundle.
     """
     from src.config import _load_dotenv
@@ -110,19 +105,6 @@ def run_pipeline(
         return 2
     _say(f"subject_hash = {face.subject_hash}")
     _say(f"quality = {face.quality:.3f}   faces detected = {face.num_faces_detected}")
-
-    # ----- CONSENT (self-consent shortcut) -------------------------------- #
-    if auto_consent:
-        rec = ledger.register_consent(face.subject_hash, True)
-        _say(f"self-consent registered ({rec.status.value}) -- uploading own face", style="green")
-
-    # ----- GATE (consent) ------------------------------------------------- #
-    try:
-        check_consent_or_refuse(face.subject_hash, ledger, operator=operator, audit=audit)
-    except ConsentRefused as exc:
-        _panel(str(exc), "CONSENT REFUSED", "red")
-        return 5
-    _say("consent registered -> search ALLOWED", style="green")
 
     # ----- [2/3] SEARCH --------------------------------------------------- #
     _rule(f"[2/3] SEARCH  -  engine={engine}  (reverse image search + face re-verify)")
@@ -245,15 +227,13 @@ def run_pipeline(
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m src.pipeline", description="Face -> search -> blockchain evidence pipeline.")
-    p.add_argument("--image", required=True, help="local image of the (consented) subject")
+    p.add_argument("--image", required=True, help="local image of the subject")
     p.add_argument("--threshold", type=float, default=None, help="match threshold [0..1] (default FACE_MATCH_THRESHOLD)")
     p.add_argument("--max", type=int, default=50, help="max candidates to face-check")
     p.add_argument("--refresh", action="store_true", help="force a LIVE SerpApi search (spends 1)")
     p.add_argument("--salt", default=None, help="hashing salt (default from .env)")
     p.add_argument("--out", default="out", help="output directory for evidence bundles")
     p.add_argument("--operator", default=None, help="who is running this (audit trail)")
-    p.add_argument("--consent", action="store_true",
-                   help="self-consent: register consent for this face first, then run (one-shot)")
     p.add_argument("--verify", action="store_true",
                    help="after anchoring, immediately re-verify the evidence bundle")
     p.add_argument("--engine", choices=["auto", "lens", "yandex"], default="auto",
@@ -268,7 +248,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     return run_pipeline(
         args.image, threshold=args.threshold, max_candidates=args.max,
         refresh=args.refresh, salt=args.salt, out_dir=args.out, operator=args.operator,
-        auto_consent=args.consent, do_verify=args.verify,
+        do_verify=args.verify,
         engine=args.engine, image_url=args.image_url,
     )
 
