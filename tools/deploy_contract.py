@@ -34,7 +34,7 @@ def main() -> None:
 
     contract_address = receipt.contractAddress
     os.environ["EVM_CONTRACT_ADDRESS"] = contract_address
-    print(f"✅ EvidenceLedger deployed at: {contract_address}")
+    print(f"[OK] EvidenceLedger deployed at: {contract_address}")
 
     print(f"   Block Number: {receipt.blockNumber}")
     print(f"   Tx Hash: {tx_hash.hex()}")
@@ -71,7 +71,7 @@ def main() -> None:
     with open(env_path, "w", encoding="utf-8") as fh:
         fh.writelines(new_lines)
 
-    print(f"✅ Updated {env_path} with deployed contract configuration.")
+    print(f"[OK] Updated {env_path} with deployed contract configuration.")
 
 
 if __name__ == "__main__":

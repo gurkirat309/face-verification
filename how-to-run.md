@@ -6,17 +6,26 @@ Short guide to running the application on both the EVM Blockchain and the Local 
 
 ## 🚀 Option A: On-Chain EVM (Hardhat)
 
+### 0. One-time install
+```bash
+pip install -r requirements.txt      # includes web3 (needed for the EVM backend)
+npm install                          # Hardhat + toolchain (needs Node 20+)
+npx hardhat compile                  # produces artifacts/ used by the deploy script
+```
+
 ### 1. Start Local Blockchain
-*(Terminal 1)*
+*(Terminal 1 — leave it running)*
 ```bash
 npx hardhat node
 ```
 
 ### 2. Deploy Smart Contract
-*(Terminal 2)*
+*(Terminal 2 — writes the contract address + LEDGER_BACKEND=evm into .env)*
 ```bash
 python tools/deploy_contract.py
 ```
+> The EVM backend only works while `npx hardhat node` is running. If you stop the
+> node, set `LEDGER_BACKEND=local` in `.env` (Option B) or re-run steps 1-2.
 
 ### 3. Register Consent
 ```bash

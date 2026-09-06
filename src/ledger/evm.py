@@ -148,7 +148,11 @@ class EVMLedgerAdapter(LedgerAdapter):
                     "gas": 300000,
                 })
                 signed = self._account.sign_transaction(tx)
-                tx_hash = self._w3.eth.send_raw_transaction(signed.rawTransaction)
+                # web3 v7+ renamed rawTransaction -> raw_transaction; support both.
+                raw = getattr(signed, "raw_transaction", None)
+                if raw is None:
+                    raw = signed.rawTransaction
+                tx_hash = self._w3.eth.send_raw_transaction(raw)
             elif hasattr(self, "_account_address") and self._account_address:
                 # Local node unlocked account
                 tx_hash = contract_func.transact({"from": self._account_address})
