@@ -277,7 +277,7 @@ def parse_candidates(response: dict) -> list[Candidate]:
     return out
 
 
-def download_image(url: str, cache_dir: str = DEFAULT_CACHE_DIR, timeout: int = 25) -> Optional[str]:
+def download_image(url: str, cache_dir: str = DEFAULT_CACHE_DIR, timeout: int = 12) -> Optional[str]:
     """Download an image to cache/images/, keyed by URL hash. Returns the local
     path, or None on failure (per-candidate failures must not kill the run)."""
     img_dir = os.path.join(cache_dir, "images")
@@ -315,7 +315,7 @@ def search_and_verify(
     *,
     client: SerpApiLensClient,
     threshold: float = 0.5,
-    max_candidates: int = 100,
+    max_candidates: int = 50,
     refresh: bool = False,
     salt: Optional[str] = None,
     verbose: bool = False,
@@ -355,6 +355,8 @@ def _verify_candidates(
     """Pass 2 (engine-agnostic): download each candidate image and re-run the
     face matcher, keeping matches above the threshold. Falls back to the
     engine-hosted thumbnail when the full image URL won't download as a face."""
+    from concurrent.futures import ThreadPoolExecutor
+
     from src._util import suppress_native_stderr
     from src.face import FaceError, NoFaceError, cosine_similarity, encode_face
 
@@ -362,23 +364,30 @@ def _verify_candidates(
         query_image_url=query_label, was_cached=was_cached,
         total_candidates=len(candidates), checked=0, threshold=threshold,
     )
-    for cand in candidates[:max_candidates]:
-        res = None
-        used_path = None
+    cands = candidates[:max_candidates]
+
+    # Pass 2a: download candidate images CONCURRENTLY (the dominant latency).
+    # Try the full image URL first, fall back to the engine-hosted thumbnail.
+    def _fetch(cand: Candidate):
         for url in (cand.image_url, cand.thumbnail_url):
             if not url:
                 continue
             path = download_image(url)
-            if not path:
-                continue
-            try:
-                with suppress_native_stderr():
-                    res = encode_face(path, salt=salt or "search-temp-salt", recover=False)
-                used_path = path
-                break
-            except (NoFaceError, FaceError, FileNotFoundError):
-                continue
-        if res is None:
+            if path:
+                return cand, path
+        return cand, None
+
+    with ThreadPoolExecutor(max_workers=12) as ex:
+        fetched = list(ex.map(_fetch, cands))
+
+    # Pass 2b: face-check locally (kept sequential; insightface is CPU-bound).
+    for cand, path in fetched:
+        if not path:
+            continue
+        try:
+            with suppress_native_stderr():
+                res = encode_face(path, salt=salt or "search-temp-salt", recover=False)
+        except (NoFaceError, FaceError, FileNotFoundError):
             continue
         outcome.checked += 1
         sim = cosine_similarity(reference_embedding, res.embedding)
@@ -386,7 +395,7 @@ def _verify_candidates(
             print(f"    checked {cand.source[:28]:28} [{cand.section[:8]:8}] sim={sim:+.3f} {'MATCH' if sim>=threshold else ''}")
         outcome.best_similarity = max(outcome.best_similarity, sim)
         if sim >= threshold:
-            outcome.matches.append(VerifiedMatch(candidate=cand, similarity=sim, image_local_path=used_path))
+            outcome.matches.append(VerifiedMatch(candidate=cand, similarity=sim, image_local_path=path))
 
     outcome.matches.sort(key=lambda m: m.similarity, reverse=True)
     return outcome
@@ -478,7 +487,7 @@ def yandex_search_and_verify(
     *,
     client: YandexClient,
     threshold: float = 0.5,
-    max_candidates: int = 100,
+    max_candidates: int = 50,
     refresh: bool = False,
     salt: Optional[str] = None,
     verbose: bool = False,
@@ -506,7 +515,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--image", required=True, help="local image of the subject (uploaded to SerpApi + used for pass-2 matching)")
     p.add_argument("--reference", default=None, help="local reference image for pass-2 (default: same as --image)")
     p.add_argument("--threshold", type=float, default=None, help="match threshold [0..1] (default: FACE_MATCH_THRESHOLD or 0.5)")
-    p.add_argument("--max", type=int, default=100, help="max candidates to face-check")
+    p.add_argument("--max", type=int, default=50, help="max candidates to face-check")
     p.add_argument("--refresh", action="store_true", help="force a LIVE SerpApi call (spends 1 search)")
     p.add_argument("--salt", default=None, help="hashing salt (default from .env)")
     return p

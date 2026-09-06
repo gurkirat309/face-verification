@@ -75,7 +75,7 @@ def run_pipeline(
     image_path: str,
     *,
     threshold: Optional[float] = None,
-    max_candidates: int = 100,
+    max_candidates: int = 50,
     refresh: bool = False,
     salt: Optional[str] = None,
     out_dir: str = "out",
@@ -247,7 +247,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m src.pipeline", description="Face -> search -> blockchain evidence pipeline.")
     p.add_argument("--image", required=True, help="local image of the (consented) subject")
     p.add_argument("--threshold", type=float, default=None, help="match threshold [0..1] (default FACE_MATCH_THRESHOLD)")
-    p.add_argument("--max", type=int, default=100, help="max candidates to face-check")
+    p.add_argument("--max", type=int, default=50, help="max candidates to face-check")
     p.add_argument("--refresh", action="store_true", help="force a LIVE SerpApi search (spends 1)")
     p.add_argument("--salt", default=None, help="hashing salt (default from .env)")
     p.add_argument("--out", default="out", help="output directory for evidence bundles")
