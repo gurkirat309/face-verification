@@ -45,14 +45,27 @@ def _make_local(tmp_path) -> LedgerAdapter:
 def _make_evm(tmp_path) -> LedgerAdapter:
     # Only used when RUN_EVM_TESTS=1. The teammate's real adapter.
     os.environ["LEDGER_BACKEND"] = "evm"
+    from tools.deploy_contract import main as deploy_main
+
+    try:
+        deploy_main()
+    except Exception:
+        pass
+
     from src.config import get_ledger_adapter
 
     return get_ledger_adapter()
 
 
+
+from src.config import _load_dotenv
+
+_load_dotenv()
+
 _PARAMS = ["local"]
 if os.environ.get("RUN_EVM_TESTS") == "1":
     _PARAMS.append("evm")
+
 
 
 @pytest.fixture(params=_PARAMS)
