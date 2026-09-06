@@ -73,4 +73,6 @@ def get_ledger_adapter() -> LedgerAdapter:
         rpc_url=os.environ.get("EVM_RPC_URL"),
         contract_address=os.environ.get("EVM_CONTRACT_ADDRESS"),
         chain_id=os.environ.get("EVM_CHAIN_ID"),
+        private_key=os.environ.get("EVM_PRIVATE_KEY"),
     )
+

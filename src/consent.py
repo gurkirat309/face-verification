@@ -127,12 +127,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    from src.config import _load_dotenv
+
+    _load_dotenv()
     args = _build_parser().parse_args(argv)
     try:
         return args.func(args)
     except Exception as exc:  # face errors, ledger errors -> clear message + nonzero
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+
 
 
 if __name__ == "__main__":
