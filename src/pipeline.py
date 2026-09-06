@@ -82,7 +82,7 @@ def run_pipeline(
     operator: Optional[str] = None,
     auto_consent: bool = False,
     do_verify: bool = False,
-    engine: str = "lens",
+    engine: str = "auto",
     image_url: Optional[str] = None,
 ) -> int:
     """Execute the full pipeline. Returns a process exit code.
@@ -125,31 +125,49 @@ def run_pipeline(
     _say("consent registered -> search ALLOWED", style="green")
 
     # ----- [2/3] SEARCH --------------------------------------------------- #
-    _rule(f"[2/3] SEARCH  -  {engine} reverse image search + face re-verify")
+    _rule(f"[2/3] SEARCH  -  engine={engine}  (reverse image search + face re-verify)")
+
+    def _run_lens():
+        return search_and_verify(
+            image_path, face.embedding, client=SerpApiLensClient(api_key),
+            threshold=threshold, max_candidates=max_candidates, refresh=refresh, salt=salt,
+        )
+
+    def _run_yandex():
+        from src.hosting import imgbb_upload  # may raise HostingError (subclass of RuntimeError)
+
+        public_url = image_url or imgbb_upload(
+            image_path, os.environ.get("IMGBB_API_KEY", ""), refresh=refresh
+        )
+        _say(f"hosted for Yandex: {public_url}")
+        return yandex_search_and_verify(
+            public_url, face.embedding, client=YandexClient(api_key),
+            threshold=threshold, max_candidates=max_candidates, refresh=refresh, salt=salt,
+        )
+
+    used_engine = engine
     try:
         if engine == "yandex":
-            from src.hosting import HostingError, imgbb_upload
-
-            try:
-                public_url = image_url or imgbb_upload(
-                    image_path, os.environ.get("IMGBB_API_KEY", ""), refresh=refresh
-                )
-            except HostingError as exc:
-                _panel(str(exc), "HOSTING FAILED", "red")
-                return 6
-            _say(f"hosted for Yandex: {public_url}")
-            outcome = yandex_search_and_verify(
-                public_url, face.embedding, client=YandexClient(api_key),
-                threshold=threshold, max_candidates=max_candidates, refresh=refresh, salt=salt,
-            )
-        else:
-            outcome = search_and_verify(
-                image_path, face.embedding, client=SerpApiLensClient(api_key),
-                threshold=threshold, max_candidates=max_candidates, refresh=refresh, salt=salt,
-            )
+            outcome = _run_yandex()
+        elif engine == "lens":
+            outcome = _run_lens()
+        else:  # auto: Google Lens first, fall back to Yandex only if no match
+            _say("trying Google Lens first ...")
+            outcome = _run_lens()
+            used_engine = "lens"
+            if not outcome.matched:
+                _say(f"Lens: no match (best {outcome.best_similarity:.3f}) -> falling back to Yandex ...", style="yellow")
+                try:
+                    y = _run_yandex()
+                    # keep Yandex if it matched, or if it at least looked closer
+                    if y.matched or y.best_similarity > outcome.best_similarity:
+                        outcome, used_engine = y, "yandex"
+                except Exception as exc:  # HostingError / SearchError -> keep Lens result
+                    _say(f"Yandex fallback unavailable: {exc}", style="yellow")
     except SearchError as exc:
         _panel(str(exc), "SEARCH FAILED", "red")
         return 6
+    _say(f"engine used = {used_engine}")
     _say(f"source = {'CACHED (0 searches spent)' if outcome.was_cached else 'LIVE (1 search spent)'}")
     _say(f"candidates = {outcome.total_candidates} returned, {outcome.checked} face-checked")
 
@@ -238,8 +256,8 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="self-consent: register consent for this face first, then run (one-shot)")
     p.add_argument("--verify", action="store_true",
                    help="after anchoring, immediately re-verify the evidence bundle")
-    p.add_argument("--engine", choices=["lens", "yandex"], default="lens",
-                   help="search engine: lens (Google Lens, default) or yandex (needs IMGBB_API_KEY)")
+    p.add_argument("--engine", choices=["auto", "lens", "yandex"], default="auto",
+                   help="auto (default: Google Lens, then Yandex if no match), lens only, or yandex only")
     p.add_argument("--image-url", default=None,
                    help="public image URL for yandex (skip imgbb upload; e.g. a GitHub raw URL)")
     return p
