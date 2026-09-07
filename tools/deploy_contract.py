@@ -6,10 +6,16 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from web3 import Web3
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from src.config import _load_dotenv
 
 
 def main() -> None:
+    _load_dotenv()
     rpc_url = os.environ.get("EVM_RPC_URL", "http://127.0.0.1:8545")
     w3 = Web3(Web3.HTTPProvider(rpc_url))
     if not w3.is_connected():
@@ -24,12 +30,33 @@ def main() -> None:
 
     abi = artifact["abi"]
     bytecode = artifact["bytecode"]
-
-    account = w3.eth.accounts[0]
-    print(f"Deploying EvidenceLedger from account: {account}")
-
     Contract = w3.eth.contract(abi=abi, bytecode=bytecode)
-    tx_hash = Contract.constructor().transact({"from": account})
+
+    private_key = os.environ.get("EVM_PRIVATE_KEY", "").strip()
+    if private_key:
+        account_obj = w3.eth.account.from_key(private_key)
+        account = account_obj.address
+        print(f"Deploying EvidenceLedger from private key account: {account}")
+
+        construct_tx = Contract.constructor().build_transaction({
+            "from": account,
+            "nonce": w3.eth.get_transaction_count(account),
+            "chainId": w3.eth.chain_id,
+        })
+        signed_tx = account_obj.sign_transaction(construct_tx)
+        raw_tx = getattr(signed_tx, "raw_transaction", None) or getattr(signed_tx, "rawTransaction")
+        tx_hash = w3.eth.send_raw_transaction(raw_tx)
+    elif w3.eth.accounts:
+        account = w3.eth.accounts[0]
+        print(f"Deploying EvidenceLedger from local node account: {account}")
+        tx_hash = Contract.constructor().transact({"from": account})
+    else:
+        raise RuntimeError(
+            "No available account to sign deployment. "
+            "For Sepolia/Testnet: Ensure EVM_PRIVATE_KEY is set in .env. "
+            "For Local Node: Ensure 'npx hardhat node' is running."
+        )
+
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
 
     contract_address = receipt.contractAddress

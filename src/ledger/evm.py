@@ -142,11 +142,18 @@ class EVMLedgerAdapter(LedgerAdapter):
         try:
             if hasattr(self, "_account") and self._account is not None:
                 # Private key signer
-                tx = contract_func.build_transaction({
+                tx_params = {
                     "from": self._account.address,
                     "nonce": self._w3.eth.get_transaction_count(self._account.address),
-                    "gas": 300000,
-                })
+                    "chainId": self._w3.eth.chain_id,
+                }
+                try:
+                    estimated_gas = contract_func.estimate_gas({"from": self._account.address})
+                    tx_params["gas"] = int(estimated_gas * 1.2)
+                except Exception:
+                    tx_params["gas"] = 300000
+
+                tx = contract_func.build_transaction(tx_params)
                 signed = self._account.sign_transaction(tx)
                 # web3 v7+ renamed rawTransaction -> raw_transaction; support both.
                 raw = getattr(signed, "raw_transaction", None)
