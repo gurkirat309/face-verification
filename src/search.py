@@ -377,25 +377,75 @@ def _verify_candidates(
                 return cand, path
         return cand, None
 
-    with ThreadPoolExecutor(max_workers=12) as ex:
-        fetched = list(ex.map(_fetch, cands))
+    try:
+        from rich.progress import (
+            BarColumn,
+            MofNCompleteColumn,
+            Progress,
+            SpinnerColumn,
+            TaskProgressColumn,
+            TextColumn,
+            TimeElapsedColumn,
+        )
+        _has_progress = True
+    except Exception:
+        _has_progress = False
 
-    # Pass 2b: face-check locally (kept sequential; insightface is CPU-bound).
-    for cand, path in fetched:
-        if not path:
-            continue
-        try:
-            with suppress_native_stderr():
-                res = encode_face(path, salt=salt or "search-temp-salt", recover=False)
-        except (NoFaceError, FaceError, FileNotFoundError):
-            continue
-        outcome.checked += 1
-        sim = cosine_similarity(reference_embedding, res.embedding)
-        if verbose:
-            print(f"    checked {cand.source[:28]:28} [{cand.section[:8]:8}] sim={sim:+.3f} {'MATCH' if sim>=threshold else ''}")
-        outcome.best_similarity = max(outcome.best_similarity, sim)
-        if sim >= threshold:
-            outcome.matches.append(VerifiedMatch(candidate=cand, similarity=sim, image_local_path=path))
+    if _has_progress:
+        with Progress(
+            SpinnerColumn(style="cyan"),
+            TextColumn("[bold cyan]{task.description}"),
+            BarColumn(complete_style="green", finished_style="bold green"),
+            TaskProgressColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            transient=True,
+        ) as progress:
+            dl_task = progress.add_task("Fetching candidate images...", total=len(cands))
+            fetched = []
+            with ThreadPoolExecutor(max_workers=12) as ex:
+                futures = [ex.submit(_fetch, c) for c in cands]
+                for fut in futures:
+                    fetched.append(fut.result())
+                    progress.advance(dl_task)
+
+            fc_task = progress.add_task("Running biometric re-verification...", total=len(fetched))
+            for cand, path in fetched:
+                progress.advance(fc_task)
+                if not path:
+                    continue
+                try:
+                    with suppress_native_stderr():
+                        res = encode_face(path, salt=salt or "search-temp-salt", recover=False)
+                except (NoFaceError, FaceError, FileNotFoundError):
+                    continue
+                outcome.checked += 1
+                sim = cosine_similarity(reference_embedding, res.embedding)
+                if verbose:
+                    print(f"    checked {cand.source[:28]:28} [{cand.section[:8]:8}] sim={sim:+.3f} {'MATCH' if sim>=threshold else ''}")
+                outcome.best_similarity = max(outcome.best_similarity, sim)
+                if sim >= threshold:
+                    outcome.matches.append(VerifiedMatch(candidate=cand, similarity=sim, image_local_path=path))
+    else:
+        with ThreadPoolExecutor(max_workers=12) as ex:
+            fetched = list(ex.map(_fetch, cands))
+
+        # Pass 2b: face-check locally (kept sequential; insightface is CPU-bound).
+        for cand, path in fetched:
+            if not path:
+                continue
+            try:
+                with suppress_native_stderr():
+                    res = encode_face(path, salt=salt or "search-temp-salt", recover=False)
+            except (NoFaceError, FaceError, FileNotFoundError):
+                continue
+            outcome.checked += 1
+            sim = cosine_similarity(reference_embedding, res.embedding)
+            if verbose:
+                print(f"    checked {cand.source[:28]:28} [{cand.section[:8]:8}] sim={sim:+.3f} {'MATCH' if sim>=threshold else ''}")
+            outcome.best_similarity = max(outcome.best_similarity, sim)
+            if sim >= threshold:
+                outcome.matches.append(VerifiedMatch(candidate=cand, similarity=sim, image_local_path=path))
 
     outcome.matches.sort(key=lambda m: m.similarity, reverse=True)
     return outcome

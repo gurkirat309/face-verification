@@ -37,6 +37,13 @@ from src.search import (
     search_and_verify,
     yandex_search_and_verify,
 )
+from src.ui import (
+    print_anchored_certificate,
+    print_banner,
+    print_face_card,
+    print_matches_table,
+    print_no_match_card,
+)
 
 try:
     from rich.console import Console
@@ -96,18 +103,23 @@ def run_pipeline(
     ledger = get_ledger_adapter()
     backend = os.environ.get("LEDGER_BACKEND", "local")
 
+    # ----- Header Banner -------------------------------------------------- #
+    print_banner(engine=engine, ledger_backend=backend)
+
     # ----- [1/3] FACE ----------------------------------------------------- #
-    _rule("[1/3] FACE  -  detect, embed, hash")
     try:
-        face = encode_face(image_path, salt=salt)
+        if _con:
+            with _con.status("[cyan]Analyzing facial features with ArcFace...", spinner="dots"):
+                face = encode_face(image_path, salt=salt)
+        else:
+            face = encode_face(image_path, salt=salt)
+        print_face_card(face)
     except (FileNotFoundError, FaceError) as exc:
         _panel(str(exc), "FACE FAILED", "red")
         return 2
-    _say(f"subject_hash = {face.subject_hash}")
-    _say(f"quality = {face.quality:.3f}   faces detected = {face.num_faces_detected}")
 
     # ----- [2/3] SEARCH --------------------------------------------------- #
-    _rule(f"[2/3] SEARCH  -  engine={engine}  (reverse image search + face re-verify)")
+    _rule(f"[2/3] SEARCH  -  engine={engine.upper()}  (reverse image search + face re-verify)")
 
     def _run_lens():
         return search_and_verify(
@@ -134,11 +146,11 @@ def run_pipeline(
         elif engine == "lens":
             outcome = _run_lens()
         else:  # auto: Google Lens first, fall back to Yandex only if no match
-            _say("trying Google Lens first ...")
+            _say("querying Google Lens reverse-image index ...")
             outcome = _run_lens()
             used_engine = "lens"
             if not outcome.matched:
-                _say(f"Lens: no match (best {outcome.best_similarity:.3f}) -> falling back to Yandex ...", style="yellow")
+                _say(f"Lens: no match (best {outcome.best_similarity:.1%}) -> trying Yandex fallback ...", style="yellow")
                 try:
                     y = _run_yandex()
                     # keep Yandex if it matched, or if it at least looked closer
@@ -149,36 +161,24 @@ def run_pipeline(
     except SearchError as exc:
         _panel(str(exc), "SEARCH FAILED", "red")
         return 6
-    _say(f"engine used = {used_engine}")
-    _say(f"source = {'CACHED (0 searches spent)' if outcome.was_cached else 'LIVE (1 search spent)'}")
-    _say(f"candidates = {outcome.total_candidates} returned, {outcome.checked} face-checked")
+
+    _say(f"engine used  : [bold]{used_engine.upper()}[/]")
+    _say(f"query source : {'[dim cyan]CACHED (0 searches spent)[/]' if outcome.was_cached else '[bold green]LIVE (1 search spent)[/]'}")
+    _say(f"coverage     : {outcome.total_candidates} hits returned, {outcome.checked} face-checked")
 
     if not outcome.matched:
         audit.log(face.subject_hash, "no_match",
                   f"best_sim={outcome.best_similarity:.3f} < {threshold}", operator=operator)
-        _panel(
-            f"No matching post found.\nBest similarity seen: {outcome.best_similarity:.3f} "
-            f"(below threshold {threshold}).\nNothing anchored -- this is a clean exit.",
-            "NO MATCH", "yellow",
-        )
+        print_no_match_card(outcome.best_similarity, threshold)
         return 0
 
     best = outcome.matches[0]
-    _say(f"VERIFIED MATCHES: {len(outcome.matches)}  (best {best.similarity:.3f})", style="green")
-    _SOCIAL = ("linkedin.", "instagram.", "twitter.", "x.com", "facebook.", "tiktok.", "youtube.")
-    social = [m for m in outcome.matches if any(s in (m.candidate.page_link + m.candidate.source).lower() for s in _SOCIAL)]
-    if social:
-        _say(f"social/profile hits: {len(social)}", style="bold yellow")
-        for m in social[:6]:
-            _say(f"  [{m.similarity:.3f}] {m.candidate.source}: {m.candidate.page_link}", style="yellow")
-    _say("top matches:")
-    for m in outcome.matches[:8]:
-        _say(f"  [{m.similarity:.3f}] {m.candidate.source}: {m.candidate.page_link}")
+    print_matches_table(outcome.matches, threshold, outcome.checked)
     audit.log(face.subject_hash, "match_found",
               f"sim={best.similarity:.3f} matches={len(outcome.matches)} src={best.candidate.source}", operator=operator)
 
     # ----- [3/3] CHAIN ---------------------------------------------------- #
-    _rule("[3/3] CHAIN  -  build evidence + anchor")
+    _rule("[3/3] CHAIN  -  build evidence bundle & anchor to ledger")
     post_text = best.candidate.title or ""
     record = build_evidence_record(
         subject_hash=face.subject_hash,
@@ -198,17 +198,21 @@ def run_pipeline(
         _panel(f"Anchoring failed: {exc}", "CHAIN FAILED", "red")
         return 8
 
-    body = (
-        f"record_id    : {record.record_id}\n"
-        f"bundle_hash  : {record.bundle_hash}\n"
-        f"image_sha256 : {record.image_sha256}\n"
-        f"image_pHash  : {record.image_phash}\n"
-        f"confidence   : {record.match_confidence:.3f}  (threshold {record.match_threshold})\n"
-        f"anchor       : {receipt.status.value} on '{receipt.backend}'  tx={receipt.tx_ref[:24]}...\n"
-        f"evidence     : {paths.record_json}\n\n"
-        f"Verify it:  python -m src.verify --evidence {paths.record_json}"
-    )
-    _panel(body, "EVIDENCE ANCHORED", "green")
+    print_anchored_certificate(record, receipt, paths.record_json)
+
+    # ----- optional immediate verification -------------------------------- #
+    if do_verify:
+        _rule("🔍 INTEGRITY VERIFICATION AUDIT", style="magenta")
+        from src.verify import _RICH, _print_plain, _print_rich, verify_bundle
+
+        ok, rows = verify_bundle(paths.record_json)
+        if _RICH:
+            _print_rich(paths.record_json, ok, rows)
+        else:
+            _print_plain(paths.record_json, ok, rows)
+        return 0 if ok else 7
+
+    return 0
 
     # ----- optional immediate verification -------------------------------- #
     if do_verify:
